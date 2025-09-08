@@ -738,6 +738,7 @@
                 <div class="notification-container">
                     <button class="notification-btn" id="notificationBtn">
                         <span class="notification-icon">🔔</span>
+                        <span class="notification-text">Notifications</span>
                         <span class="notification-badge" id="notificationBadge">0</span>
                     </button>
                     <div class="notification-dropdown" id="notificationDropdown">
@@ -777,6 +778,11 @@
                         <span class="nav-icon">📋</span>
                         <span class="nav-text">Order Management</span>
                         <span class="nav-badge" id="ordersBadge">0</span>
+                    </button>
+                    <button class="nav-item" data-section="returns" id="returnsNavButton" title="No return requests">
+                        <span class="nav-icon">↩️</span>
+                        <span class="nav-text">Returns & Exchanges</span>
+                        <span class="nav-badge" id="returnsBadge">0</span>
                     </button>
                 </div>
                 <div class="nav-section">
@@ -932,6 +938,7 @@
                                 <option value="approved">Approved</option>
                                 <option value="delivered">Delivered</option>
                                 <option value="returned">Returned</option>
+                                <option value="cancelled">Cancelled</option>
                                 <option value="completed">Walk-in/Completed</option>
                             </select>
                             <select id="paymentMethodFilter" class="form-control">
@@ -1059,6 +1066,44 @@
                         </div>
                     </div>
                 </div>
+            </section>
+
+            <!-- Returns & Exchanges Section -->
+            <section class="content-section" id="returns-section">
+                <div class="section-header">
+                    <h1>Returns & Exchanges</h1>
+                    <div class="section-controls">
+                        <select id="returnStatusFilter" class="form-control">
+                            <option value="all">All Returns</option>
+                            <option value="pending">Pending Review</option>
+                            <option value="approved">Approved</option>
+                            <option value="rejected">Rejected</option>
+                            <option value="completed">Completed</option>
+                        </select>
+                        <button class="action-btn primary" id="refreshReturnsBtn">🔄 Refresh</button>
+                    </div>
+                </div>
+
+                <div class="returns-table-container">
+                    <table class="returns-table" id="returnsTable">
+                        <thead>
+                            <tr>
+                                <th>Order ID</th>
+                                <th>Customer</th>
+                                <th>Return Type</th>
+                                <th>Reason</th>
+                                <th>Items</th>
+                                <th>Request Date</th>
+                                <th>Status</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="returnsTableBody">
+                            <!-- Return requests will be populated here -->
+                        </tbody>
+                    </table>
+                </div>
+                <div class="pagination" id="returnsPagination"></div>
             </section>
         </main>
     </div>
@@ -1690,6 +1735,20 @@
                     </tr>
                 `;
             }
+
+            showLoadingReturns() {
+                const returnsTableBody = document.getElementById('returnsTableBody');
+                returnsTableBody.innerHTML = `
+                    <tr>
+                        <td colspan="8">
+                            <div class="loading-spinner">
+                                <div class="spinner"></div>
+                                <div class="loading-text">Loading returns...</div>
+                            </div>
+                        </td>
+                    </tr>
+                `;
+            }
             
             
 
@@ -1698,9 +1757,10 @@
                 this.showLoadingStats();
                 this.showLoadingProducts();
                 this.showLoadingOrders();
-                
+
                 await this.loadProducts();
                 await this.loadOrders();
+                await this.loadReturns();
                 await this.loadComprehensiveStats();
                 this.updateStats();
                 this.renderCurrentSection();
@@ -1825,7 +1885,7 @@
                     // Fetch orders from all collections (pending, accepted, delivered)
                     const response = await fetch('http://localhost:3000/api/orders/all-staff');
                     if (!response.ok) throw new Error('Failed to fetch orders');
-                    
+
                     this.orders = await response.json();
                     console.log('📊 Staff Dashboard - Loaded orders from all collections:', this.orders.length);
                     console.log('📋 Orders breakdown:', {
@@ -1835,7 +1895,7 @@
                         returned: this.orders.filter(o => o.collection === 'returned').length,
                         walkin: this.orders.filter(o => o.collection === 'walkin').length
                     });
-                    
+
                     // Debug: Log first few orders to see their structure
                     console.log('🔍 Sample orders:', this.orders.slice(0, 3).map(o => ({
                         id: o._id?.slice(-6),
@@ -1844,11 +1904,39 @@
                         displayStatus: o.displayStatus,
                         orderNumber: o.orderNumber
                     })));
-                    
+
                     this.checkForNewOrders();
                 } catch (error) {
                     console.error('Error loading orders:', error);
                     this.orders = [];
+                }
+            }
+
+            async loadReturns() {
+                try {
+                    // Fetch returned orders from the returned collection
+                    const response = await fetch('http://localhost:3000/api/orders/returns');
+                    if (!response.ok) throw new Error('Failed to fetch returns');
+
+                    this.returns = await response.json();
+                    console.log('📦 Staff Dashboard - Loaded returns:', this.returns.length);
+
+                    // Update returns badge
+                    const returnsBadge = document.getElementById('returnsBadge');
+                    const pendingReturns = this.returns.filter(r => r.status === 'pending').length;
+                    returnsBadge.textContent = pendingReturns;
+
+                    // Update returns nav button title
+                    const returnsNavButton = document.getElementById('returnsNavButton');
+                    if (pendingReturns === 0) {
+                        returnsNavButton.title = 'No return requests';
+                    } else {
+                        returnsNavButton.title = `${pendingReturns} return request${pendingReturns > 1 ? 's' : ''}`;
+                    }
+
+                } catch (error) {
+                    console.error('Error loading returns:', error);
+                    this.returns = [];
                 }
             }
 
@@ -1899,22 +1987,31 @@
             updateNotifications() {
                 const badge = document.getElementById('notificationBadge');
                 const list = document.getElementById('notificationList');
-                
+
+                if (!badge || !list) {
+                    console.error('Notification elements not found');
+                    return;
+                }
+
                 const unreadCount = this.notifications.filter(n => !n.read).length;
                 badge.textContent = unreadCount;
                 badge.style.display = unreadCount > 0 ? 'flex' : 'none';
-                
-                list.innerHTML = this.notifications.length === 0 ? 
-                    '<div class="no-notifications">No notifications</div>' :
-                    this.notifications.map(notification => `
-                        <div class="notification-item ${notification.read ? '' : 'unread'}" data-id="${notification.id}">
+
+                console.log(`📢 Updating notifications: ${this.notifications.length} total, ${unreadCount} unread`);
+
+                if (this.notifications.length === 0) {
+                    list.innerHTML = '<div class="no-notifications">No notifications</div>';
+                } else {
+                    list.innerHTML = this.notifications.map(notification => `
+                        <div class="notification-item ${notification.read ? '' : 'unread'}" data-id="${notification.id}" onclick="staffDashboard.markNotificationAsRead('${notification.id}')">
                             <div class="notification-content">
-                                <div class="notification-title">${notification.title}</div>
-                                <div class="notification-message">${notification.description}</div>
+                                <div class="notification-title">${notification.title || 'Notification'}</div>
+                                <div class="notification-message">${notification.description || notification.message || 'No message'}</div>
                                 <div class="notification-time">${this.formatTime(notification.time)}</div>
                             </div>
                         </div>
                     `).join('');
+                }
             }
 
             formatTime(timestamp) {
@@ -2115,19 +2212,60 @@
                 });
 
                 // Notification events
-                document.getElementById('notificationBtn').addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    document.getElementById('notificationDropdown').classList.toggle('show');
-                });
+                const notificationBtn = document.getElementById('notificationBtn');
+                if (notificationBtn) {
+                    // Add debugging to ensure button is clickable
+                    console.log('✅ Notification button found:', notificationBtn);
+                    console.log('✅ Button style:', window.getComputedStyle(notificationBtn));
+                    console.log('✅ Button z-index:', window.getComputedStyle(notificationBtn).zIndex);
+                    console.log('✅ Button pointer-events:', window.getComputedStyle(notificationBtn).pointerEvents);
 
-                document.addEventListener('click', () => {
-                    document.getElementById('notificationDropdown').classList.remove('show');
-                });
+                    notificationBtn.addEventListener('click', (e) => {
+                        console.log('🔔 Notification button clicked');
+                        e.preventDefault();
+                        e.stopImmediatePropagation();
 
-                document.getElementById('clearAllBtn').addEventListener('click', () => {
-                    this.notifications = [];
-                    localStorage.setItem('staffNotifications', JSON.stringify(this.notifications));
-                    this.updateNotifications();
+                        const dropdown = document.getElementById('notificationDropdown');
+                        if (dropdown) {
+                            const isCurrentlyShown = dropdown.classList.contains('show');
+                            console.log('📋 Current dropdown state:', isCurrentlyShown);
+
+                            if (isCurrentlyShown) {
+                                dropdown.classList.remove('show');
+                                console.log('📋 Notification dropdown hidden');
+                            } else {
+                                dropdown.classList.add('show');
+                                console.log('📋 Notification dropdown shown');
+                            }
+                        } else {
+                            console.error('❌ Notification dropdown not found');
+                        }
+                    });
+
+                    // Prevent the global click handler from interfering
+                    notificationBtn.addEventListener('mousedown', (e) => {
+                        e.stopPropagation();
+                    });
+
+
+
+                    console.log('✅ Notification button event listener attached');
+                } else {
+                    console.error('❌ Notification button not found');
+                }
+
+                // Close notification dropdown when clicking outside
+                document.addEventListener('click', (e) => {
+                    const notificationBtn = document.getElementById('notificationBtn');
+                    const notificationDropdown = document.getElementById('notificationDropdown');
+
+                    // Only close if the click is NOT on the button or dropdown
+                    if (notificationBtn && notificationDropdown &&
+                        !notificationBtn.contains(e.target) &&
+                        !notificationDropdown.contains(e.target)) {
+                        console.log('📋 Closing dropdown due to outside click');
+                        notificationDropdown.classList.remove('show');
+                    }
                 });
 
                 // Dashboard events
@@ -2176,6 +2314,14 @@
                 document.getElementById('orderSearch').addEventListener('input', () => {
                     this.currentPage = 1;
                     this.renderOrders();
+                });
+
+                // Returns refresh functionality
+                document.getElementById('refreshReturnsBtn').addEventListener('click', async () => {
+                    this.showLoadingReturns();
+                    await this.loadReturns();
+                    this.renderReturns();
+                    showToast('Returns refreshed', 'success');
                 });
 
                 // Date dropdown functionality
@@ -2428,6 +2574,9 @@
                 } else if (this.currentSection === 'orders') {
                     this.showLoadingOrders();
                     setTimeout(() => this.renderOrders(), 150);
+                } else if (this.currentSection === 'returns') {
+                    this.showLoadingReturns();
+                    setTimeout(() => this.renderReturns(), 150);
                 } else {
                     // No loading for dashboard and cashier sections
                     switch(this.currentSection) {
@@ -2682,7 +2831,7 @@
             renderWalkInOrders() {
                 console.log('Walk-in orders rendering disabled - will be implemented with database integration');
                 return;
-                /* 
+                /*
                 const tbody = document.getElementById('walkInOrdersTableBody');
 
                 if (this.walkInOrders.length === 0) {
@@ -2691,7 +2840,7 @@
                 }
 
                 const sortedOrders = [...this.walkInOrders].sort((a, b) => new Date(b.date) - new Date(a.date));
-                
+
                 tbody.innerHTML = sortedOrders.map(order => `
                     <tr>
                         <td>#${order.id.toString().slice(-6)}</td>
@@ -2710,6 +2859,74 @@
                     </tr>
                 `).join('');
                 */
+            }
+
+            renderReturns() {
+                const tbody = document.getElementById('returnsTableBody');
+                const statusFilter = document.getElementById('returnStatusFilter').value;
+
+                console.log('🔄 Rendering returns with filter:', statusFilter);
+                console.log('📦 Total returns available:', this.returns.length);
+
+                let filteredReturns = this.returns;
+
+                // Filter by status
+                if (statusFilter !== 'all') {
+                    filteredReturns = filteredReturns.filter(r => r.status === statusFilter);
+                    console.log('📦 Returns after status filtering:', filteredReturns.length);
+                }
+
+                // Sort by request date (newest first)
+                filteredReturns.sort((a, b) => new Date(b.requestDate || b.createdAt) - new Date(a.requestDate || a.createdAt));
+
+                const start = (this.currentPage - 1) * this.itemsPerPage;
+                const end = start + this.itemsPerPage;
+                const displayed = filteredReturns.slice(start, end);
+
+                if (displayed.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="8" class="no-data">No return requests found</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = displayed.map(returnRequest => {
+                    const orderNumber = returnRequest.orderNumber || this.generateOrderNumber(returnRequest);
+                    const customerName = returnRequest.fullName || returnRequest.buyerinfo || 'N/A';
+                    const requestDate = new Date(returnRequest.requestDate || returnRequest.createdAt || returnRequest.original_date).toLocaleString();
+                    const status = returnRequest.status || 'pending';
+                    const returnType = returnRequest.returnType || 'Return';
+                    const reason = returnRequest.returnReason || 'No reason provided';
+                    const itemsCount = (returnRequest.itemsordered || []).length;
+
+                    return `
+                        <tr>
+                            <td>${orderNumber}</td>
+                            <td>${customerName}</td>
+                            <td>
+                                <span class="return-type-badge">${returnType}</span>
+                            </td>
+                            <td>
+                                <div class="return-reason-cell" title="${reason}">
+                                    ${reason.length > 30 ? reason.substring(0, 30) + '...' : reason}
+                                </div>
+                            </td>
+                            <td>${itemsCount} item${itemsCount !== 1 ? 's' : ''}</td>
+                            <td>${requestDate}</td>
+                            <td>
+                                <span class="status-badge ${status.toLowerCase()}">
+                                    ${status.charAt(0).toUpperCase() + status.slice(1)}
+                                </span>
+                            </td>
+                            <td>
+                                <button class="action-btn small" onclick="staffDashboard.viewReturn('${returnRequest._id}')">View</button>
+                                ${status === 'pending' ? `
+                                    <button class="action-btn small primary" onclick="staffDashboard.processReturn('${returnRequest._id}')">Process</button>
+                                ` : ''}
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+
+                this.updatePagination('returnsPagination', filteredReturns.length);
             }
 
             renderPOSProducts(category = 'all') {
@@ -4590,8 +4807,34 @@
                 dropZoneContent.style.display = 'block';
                 removeBtn.classList.add('hidden');
                 fileInput.value = '';
-                
+
                 showToast('Image removed', 'info');
+            }
+
+            // View return request details
+            viewReturn(returnId) {
+                const returnRequest = this.returns.find(r => r._id === returnId);
+                if (!returnRequest) {
+                    showToast('Return request not found', 'error');
+                    return;
+                }
+
+                // Use the existing order modal to display return details
+                this.currentEditingOrder = returnRequest;
+                this.viewOrder(returnId);
+            }
+
+            // Process return request
+            processReturn(returnId) {
+                const returnRequest = this.returns.find(r => r._id === returnId);
+                if (!returnRequest) {
+                    showToast('Return request not found', 'error');
+                    return;
+                }
+
+                // Show the return dialog
+                this.currentEditingOrder = returnRequest;
+                this.showOrderReturnDialog();
             }
         }
 

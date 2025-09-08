@@ -2003,15 +2003,15 @@ app.get('/api/orders/:orderId/return-documentation', async (req, res) => {
 app.get('/api/orders/returned', async (req, res) => {
     try {
         console.log(`📦 Fetching all returned orders with documentation`);
-        
+
         const database = client.db("MyProductsDb");
         const returnedOrdersCollection = database.collection("ReturnedOrders");
-        
+
         // Get all returned orders, sorted by most recent first
         const returnedOrders = await returnedOrdersCollection.find({})
             .sort({ returnedAt: -1 })
             .toArray();
-        
+
         // Format the returned orders with documentation info
         const formattedOrders = returnedOrders.map(order => ({
             _id: order._id,
@@ -2031,18 +2031,508 @@ app.get('/api/orders/returned', async (req, res) => {
             returnImageAvailable: !!(order.returnImage),
             returnImageUploadedAt: order.returnImageUploadedAt || null
         }));
-        
+
         console.log(`✅ Retrieved ${formattedOrders.length} returned orders`);
-        
+
         res.json({
             success: true,
             count: formattedOrders.length,
             returnedOrders: formattedOrders
         });
-        
+
     } catch (error) {
         console.error("❌ Error fetching returned orders:", error);
         res.status(500).json({ error: "Failed to fetch returned orders", details: error.message });
+    }
+});
+
+// API endpoint to submit return/exchange request from order history
+app.post('/api/orders/return-request', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const {
+            orderId,
+            returnType,
+            selectedItems,
+            reason,
+            additionalComments,
+            returnImage
+        } = req.body;
+
+        console.log('🔄 Processing return/exchange request:', {
+            orderId,
+            returnType,
+            selectedItems: selectedItems?.length,
+            reason,
+            hasImage: !!returnImage
+        });
+
+        if (!orderId || !returnType || !selectedItems || selectedItems.length === 0) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing required fields: orderId, returnType, and selectedItems"
+            });
+        }
+
+        const database = client.db("MyProductsDb");
+
+        // Find the original order in any collection
+        const collections = [
+            { name: 'DeliveredOrders', collection: database.collection("DeliveredOrders") },
+            { name: 'AcceptedOrders', collection: database.collection("AcceptedOrders") },
+            { name: 'PendingOrders', collection: database.collection("PendingOrders") }
+        ];
+
+        let originalOrder = null;
+        let sourceCollection = null;
+
+        for (const { name, collection } of collections) {
+            originalOrder = await collection.findOne({ _id: new ObjectId(orderId) });
+            if (originalOrder) {
+                sourceCollection = { name, collection };
+                break;
+            }
+        }
+
+        if (!originalOrder) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found"
+            });
+        }
+
+        // Create return request record
+        const returnRequest = {
+            originalOrderId: orderId,
+            orderNumber: originalOrder.orderNumber || `ORD-${orderId.slice(-6)}`,
+            customerName: originalOrder.fullName || originalOrder.buyerinfo || 'N/A',
+            customerEmail: originalOrder.email || 'N/A',
+            customerPhone: originalOrder.phoneNumber || 'N/A',
+            returnType: returnType, // 'return' or 'exchange'
+            selectedItems: selectedItems,
+            reason: reason,
+            additionalComments: additionalComments || '',
+            returnImage: returnImage || null,
+            originalOrderTotal: originalOrder.total || 0,
+            originalOrderDate: originalOrder.orderDate || originalOrder.createdAt,
+            status: 'pending_review', // pending_review, approved, rejected, processed
+            submittedAt: new Date(),
+            submittedBy: 'customer',
+            sourceCollection: sourceCollection.name
+        };
+
+        // Save return request to ReturnRequests collection
+        const returnRequestsCollection = database.collection("ReturnRequests");
+        const result = await returnRequestsCollection.insertOne(returnRequest);
+
+        console.log(`✅ Return request saved with ID: ${result.insertedId}`);
+
+        // Create staff notification for new return request
+        const staffNotificationsCollection = database.collection("StaffNotifications");
+        const notification = {
+            id: `return_${result.insertedId}_${Date.now()}`,
+            title: '🔄 New Return/Exchange Request',
+            message: `${returnRequest.customerName} submitted a ${returnType} request for order ${returnRequest.orderNumber}`,
+            type: 'return_request',
+            orderId: orderId,
+            requestId: result.insertedId,
+            customerName: returnRequest.customerName,
+            customerEmail: returnRequest.customerEmail,
+            orderNumber: returnRequest.orderNumber,
+            returnType: returnType,
+            reason: reason,
+            read: false,
+            createdAt: new Date(),
+            priority: 'medium'
+        };
+
+        await staffNotificationsCollection.insertOne(notification);
+        console.log(`🔔 Staff notification created for return request: ${notification.id}`);
+
+        res.json({
+            success: true,
+            message: "Return/exchange request submitted successfully",
+            requestId: result.insertedId,
+            status: 'pending_review'
+        });
+
+    } catch (error) {
+        console.error("❌ Error processing return request:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to submit return request",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to submit cancellation request from order history
+app.post('/api/orders/cancel-request', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const {
+            orderId,
+            reason,
+            additionalComments
+        } = req.body;
+
+        console.log('🚫 Processing cancellation request:', {
+            orderId,
+            reason,
+            additionalComments: additionalComments?.substring(0, 50) + '...'
+        });
+
+        if (!orderId || !reason) {
+            return res.status(400).json({
+                success: false,
+                message: "Missing required fields: orderId and reason"
+            });
+        }
+
+        const database = client.db("MyProductsDb");
+
+        // Find the original order in any collection
+        const collections = [
+            { name: 'PendingOrders', collection: database.collection("PendingOrders") },
+            { name: 'AcceptedOrders', collection: database.collection("AcceptedOrders") }
+        ];
+
+        let originalOrder = null;
+        let sourceCollection = null;
+
+        for (const { name, collection } of collections) {
+            originalOrder = await collection.findOne({ _id: new ObjectId(orderId) });
+            if (originalOrder) {
+                sourceCollection = { name, collection };
+                break;
+            }
+        }
+
+        if (!originalOrder) {
+            return res.status(404).json({
+                success: false,
+                message: "Order not found or cannot be cancelled"
+            });
+        }
+
+        // Check if order can be cancelled (only pending and accepted orders)
+        const currentStatus = originalOrder.status || 'pending';
+        if (!['pending', 'active', 'approved'].includes(currentStatus.toLowerCase())) {
+            return res.status(400).json({
+                success: false,
+                message: "This order cannot be cancelled at this stage"
+            });
+        }
+
+        // Create cancellation request record
+        const cancellationRequest = {
+            originalOrderId: orderId,
+            orderNumber: originalOrder.orderNumber || `ORD-${orderId.slice(-6)}`,
+            customerName: originalOrder.fullName || originalOrder.buyerinfo || 'N/A',
+            customerEmail: originalOrder.email || 'N/A',
+            customerPhone: originalOrder.phoneNumber || 'N/A',
+            reason: reason,
+            additionalComments: additionalComments || '',
+            originalOrderTotal: originalOrder.total || 0,
+            originalOrderDate: originalOrder.orderDate || originalOrder.createdAt,
+            originalOrderStatus: currentStatus,
+            status: 'pending_review', // pending_review, approved, rejected, processed
+            submittedAt: new Date(),
+            submittedBy: 'customer',
+            sourceCollection: sourceCollection.name
+        };
+
+        // Save cancellation request to CancellationRequests collection
+        const cancellationRequestsCollection = database.collection("CancellationRequests");
+        const result = await cancellationRequestsCollection.insertOne(cancellationRequest);
+
+        console.log(`✅ Cancellation request saved with ID: ${result.insertedId}`);
+
+        // Create staff notification for new cancellation request
+        const staffNotificationsCollection = database.collection("StaffNotifications");
+        const notification = {
+            id: `cancel_${result.insertedId}_${Date.now()}`,
+            title: '🚫 New Cancellation Request',
+            message: `${cancellationRequest.customerName} requested to cancel order ${cancellationRequest.orderNumber}`,
+            type: 'cancellation_request',
+            orderId: orderId,
+            requestId: result.insertedId,
+            customerName: cancellationRequest.customerName,
+            customerEmail: cancellationRequest.customerEmail,
+            orderNumber: cancellationRequest.orderNumber,
+            reason: reason,
+            read: false,
+            createdAt: new Date(),
+            priority: 'high'
+        };
+
+        await staffNotificationsCollection.insertOne(notification);
+        console.log(`🔔 Staff notification created for cancellation request: ${notification.id}`);
+
+        res.json({
+            success: true,
+            message: "Cancellation request submitted successfully",
+            requestId: result.insertedId,
+            status: 'pending_review'
+        });
+
+    } catch (error) {
+        console.error("❌ Error processing cancellation request:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to submit cancellation request",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to get return requests for staff review
+app.get('/api/orders/return-requests', async (req, res) => {
+    try {
+        console.log('📋 Fetching return requests for staff review');
+
+        const database = client.db("MyProductsDb");
+        const returnRequestsCollection = database.collection("ReturnRequests");
+
+        const returnRequests = await returnRequestsCollection.find({})
+            .sort({ submittedAt: -1 })
+            .toArray();
+
+        console.log(`✅ Found ${returnRequests.length} return requests`);
+
+        res.json({
+            success: true,
+            count: returnRequests.length,
+            returnRequests: returnRequests
+        });
+
+    } catch (error) {
+        console.error("❌ Error fetching return requests:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch return requests",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to get cancellation requests for staff review
+app.get('/api/orders/cancellation-requests', async (req, res) => {
+    try {
+        console.log('📋 Fetching cancellation requests for staff review');
+
+        const database = client.db("MyProductsDb");
+        const cancellationRequestsCollection = database.collection("CancellationRequests");
+
+        const cancellationRequests = await cancellationRequestsCollection.find({})
+            .sort({ submittedAt: -1 })
+            .toArray();
+
+        console.log(`✅ Found ${cancellationRequests.length} cancellation requests`);
+
+        res.json({
+            success: true,
+            count: cancellationRequests.length,
+            cancellationRequests: cancellationRequests
+        });
+
+    } catch (error) {
+        console.error("❌ Error fetching cancellation requests:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch cancellation requests",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to process return request (approve/reject)
+app.put('/api/orders/return-request/:requestId', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const { requestId } = req.params;
+        const { action, staffNotes } = req.body; // action: 'approve' or 'reject'
+
+        console.log(`🔄 Processing return request ${requestId} with action: ${action}`);
+
+        if (!['approve', 'reject'].includes(action)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid action. Must be 'approve' or 'reject'"
+            });
+        }
+
+        const database = client.db("MyProductsDb");
+        const returnRequestsCollection = database.collection("ReturnRequests");
+
+        // Find the return request
+        const returnRequest = await returnRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+        if (!returnRequest) {
+            return res.status(404).json({
+                success: false,
+                message: "Return request not found"
+            });
+        }
+
+        // Update the return request status
+        const updateData = {
+            status: action === 'approve' ? 'approved' : 'rejected',
+            processedAt: new Date(),
+            processedBy: 'staff',
+            staffNotes: staffNotes || ''
+        };
+
+        await returnRequestsCollection.updateOne(
+            { _id: new ObjectId(requestId) },
+            { $set: updateData }
+        );
+
+        // If approved, move the original order to ReturnedOrders collection
+        if (action === 'approve') {
+            // Find and move the original order to ReturnedOrders
+            const collections = [
+                { name: 'DeliveredOrders', collection: database.collection("DeliveredOrders") },
+                { name: 'AcceptedOrders', collection: database.collection("AcceptedOrders") }
+            ];
+
+            for (const { collection } of collections) {
+                const originalOrder = await collection.findOne({ _id: new ObjectId(returnRequest.originalOrderId) });
+                if (originalOrder) {
+                    // Move to ReturnedOrders
+                    const returnedOrder = {
+                        ...originalOrder,
+                        returnReason: returnRequest.reason,
+                        returnType: returnRequest.returnType,
+                        returnImage: returnRequest.returnImage,
+                        returnedAt: new Date(),
+                        returnProcessedBy: 'staff',
+                        returnRequestId: requestId
+                    };
+
+                    delete returnedOrder._id; // Remove _id for new document
+
+                    const returnedCollection = database.collection("ReturnedOrders");
+                    await returnedCollection.insertOne(returnedOrder);
+
+                    // Remove from original collection
+                    await collection.deleteOne({ _id: new ObjectId(returnRequest.originalOrderId) });
+
+                    console.log(`✅ Order moved to ReturnedOrders collection`);
+                    break;
+                }
+            }
+        }
+
+        console.log(`✅ Return request ${requestId} ${action}d successfully`);
+
+        res.json({
+            success: true,
+            message: `Return request ${action}d successfully`,
+            status: updateData.status
+        });
+
+    } catch (error) {
+        console.error("❌ Error processing return request:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to process return request",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to process cancellation request (approve/reject)
+app.put('/api/orders/cancellation-request/:requestId', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const { requestId } = req.params;
+        const { action, staffNotes } = req.body; // action: 'approve' or 'reject'
+
+        console.log(`🔄 Processing cancellation request ${requestId} with action: ${action}`);
+
+        if (!['approve', 'reject'].includes(action)) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid action. Must be 'approve' or 'reject'"
+            });
+        }
+
+        const database = client.db("MyProductsDb");
+        const cancellationRequestsCollection = database.collection("CancellationRequests");
+
+        // Find the cancellation request
+        const cancellationRequest = await cancellationRequestsCollection.findOne({ _id: new ObjectId(requestId) });
+
+        if (!cancellationRequest) {
+            return res.status(404).json({
+                success: false,
+                message: "Cancellation request not found"
+            });
+        }
+
+        // Update the cancellation request status
+        const updateData = {
+            status: action === 'approve' ? 'approved' : 'rejected',
+            processedAt: new Date(),
+            processedBy: 'staff',
+            staffNotes: staffNotes || ''
+        };
+
+        await cancellationRequestsCollection.updateOne(
+            { _id: new ObjectId(requestId) },
+            { $set: updateData }
+        );
+
+        // If approved, move the original order to CancelledOrders collection
+        if (action === 'approve') {
+            // Find and move the original order to CancelledOrders
+            const collections = [
+                { name: 'PendingOrders', collection: database.collection("PendingOrders") },
+                { name: 'AcceptedOrders', collection: database.collection("AcceptedOrders") }
+            ];
+
+            for (const { collection } of collections) {
+                const originalOrder = await collection.findOne({ _id: new ObjectId(cancellationRequest.originalOrderId) });
+                if (originalOrder) {
+                    // Move to CancelledOrders
+                    const cancelledOrder = {
+                        ...originalOrder,
+                        cancellationReason: cancellationRequest.reason,
+                        cancelledAt: new Date(),
+                        cancellationProcessedBy: 'staff',
+                        cancellationRequestId: requestId
+                    };
+
+                    delete cancelledOrder._id; // Remove _id for new document
+
+                    const cancelledCollection = database.collection("CancelledOrders");
+                    await cancelledCollection.insertOne(cancelledOrder);
+
+                    // Remove from original collection
+                    await collection.deleteOne({ _id: new ObjectId(cancellationRequest.originalOrderId) });
+
+                    console.log(`✅ Order moved to CancelledOrders collection`);
+                    break;
+                }
+            }
+        }
+
+        console.log(`✅ Cancellation request ${requestId} ${action}d successfully`);
+
+        res.json({
+            success: true,
+            message: `Cancellation request ${action}d successfully`,
+            status: updateData.status
+        });
+
+    } catch (error) {
+        console.error("❌ Error processing cancellation request:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to process cancellation request",
+            error: error.message
+        });
     }
 });
 
@@ -2618,8 +3108,111 @@ app.post('/api/auth/login', async (req, res) => {
     }
 });
 
+// API endpoint to get staff notifications
+app.get('/api/staff/notifications', async (req, res) => {
+    try {
+        console.log('🔔 Fetching staff notifications');
+
+        const database = client.db("MyProductsDb");
+        const staffNotificationsCollection = database.collection("StaffNotifications");
+
+        // Get all unread notifications, sorted by creation date (newest first)
+        const notifications = await staffNotificationsCollection.find({ read: false })
+            .sort({ createdAt: -1 })
+            .toArray();
+
+        console.log(`✅ Found ${notifications.length} unread staff notifications`);
+
+        res.json({
+            success: true,
+            count: notifications.length,
+            notifications: notifications
+        });
+
+    } catch (error) {
+        console.error("❌ Error fetching staff notifications:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch staff notifications",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to mark staff notification as read
+app.put('/api/staff/notifications/:notificationId/read', async (req, res) => {
+    try {
+        const { ObjectId } = require('mongodb');
+        const { notificationId } = req.params;
+
+        console.log(`📖 Marking notification ${notificationId} as read`);
+
+        const database = client.db("MyProductsDb");
+        const staffNotificationsCollection = database.collection("StaffNotifications");
+
+        const result = await staffNotificationsCollection.updateOne(
+            { _id: new ObjectId(notificationId) },
+            { $set: { read: true, readAt: new Date() } }
+        );
+
+        if (result.matchedCount === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Notification not found"
+            });
+        }
+
+        console.log(`✅ Notification ${notificationId} marked as read`);
+
+        res.json({
+            success: true,
+            message: "Notification marked as read"
+        });
+
+    } catch (error) {
+        console.error("❌ Error marking notification as read:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to mark notification as read",
+            error: error.message
+        });
+    }
+});
+
+// API endpoint to get all staff notifications (for history)
+app.get('/api/staff/notifications/all', async (req, res) => {
+    try {
+        console.log('📋 Fetching all staff notifications');
+
+        const database = client.db("MyProductsDb");
+        const staffNotificationsCollection = database.collection("StaffNotifications");
+
+        // Get all notifications, sorted by creation date (newest first)
+        const notifications = await staffNotificationsCollection.find({})
+            .sort({ createdAt: -1 })
+            .limit(100) // Limit to last 100 notifications
+            .toArray();
+
+        console.log(`✅ Found ${notifications.length} total staff notifications`);
+
+        res.json({
+            success: true,
+            count: notifications.length,
+            notifications: notifications
+        });
+
+    } catch (error) {
+        console.error("❌ Error fetching all staff notifications:", error);
+        res.status(500).json({
+            success: false,
+            message: "Failed to fetch all staff notifications",
+            error: error.message
+        });
+    }
+});
+
 // Start server
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
     connectToMongo();
-}); 
+});
